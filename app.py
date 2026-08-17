@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-MODEL_ID = "plutoverse/LughaGen-v0-nllb-bucket"
+MODEL_ID = "plutoverse/LughaGen-v0-nllb"
 
 app = FastAPI(
     title="LughaGen API",

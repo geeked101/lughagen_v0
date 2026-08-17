@@ -1,5 +1,6 @@
 import os
 import requests
+import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -12,51 +13,69 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Will be filled at startup (avoids importing/downloading during module import/build)
+# Will be filled when loaded on demand
 tokenizer = None
 model = None
 
-@app.on_event("startup")
-def load_model():
-    global tokenizer, model
-    # Read common env var names for convenience
+# Loading state and lock for thread-safety
+_load_lock = threading.Lock()
+_loading = False
+
+def _download_and_init_model():
+    global tokenizer, model, _loading
     hf_token = (
         os.environ.get("HUGGINGFACE_HUB_TOKEN")
         or os.environ.get("HF_TOKEN")
         or os.environ.get("HUGGINGFACE_TOKEN")
     )
 
-    print("HUGGINGFACE token present:", bool(hf_token))
-
-    if hf_token:
-        try:
-            # quick HEAD to see if HF accepts the token for this repo
-            headers = {"Authorization": f"Bearer {hf_token}"}
-            r = requests.head(f"https://huggingface.co/{MODEL_ID}/resolve/main/config.json", headers=headers, timeout=10)
-            print("HF repo HEAD status:", r.status_code)
-        except Exception as e:
-            print("HF HEAD check failed:", repr(e))
-
     try:
+        _loading = True
+        print("HUGGINGFACE token present:", bool(hf_token))
+        if hf_token:
+            try:
+                headers = {"Authorization": f"Bearer {hf_token}"}
+                r = requests.head(f"https://huggingface.co/{MODEL_ID}/resolve/main/config.json", headers=headers, timeout=10)
+                print("HF repo HEAD status:", r.status_code)
+            except Exception as e:
+                print("HF HEAD check failed:", repr(e))
+
         print("Loading LughaGen tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_auth_token=hf_token)
 
-        print("Loading LughaGen model...")
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID, use_auth_token=hf_token)
+        print("Loading LughaGen model (low_cpu_mem_usage=True)...")
+        # low_cpu_mem_usage reduces peak memory requirement when loading large CPU models
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID, use_auth_token=hf_token, low_cpu_mem_usage=True)
 
         print("LughaGen loaded successfully!")
     except Exception as e:
-        # Keep server running so you can inspect logs / health endpoint
-        print("LughaGen failed to load at startup:", repr(e))
+        print("LughaGen failed to load:", repr(e))
         tokenizer = None
         model = None
+    finally:
+        _loading = False
 
+def ensure_loading_in_background():
+    """Start background loader if not loaded and not already loading."""
+    global _loading
+    if tokenizer is not None and model is not None:
+        return
+    with _load_lock:
+        if tokenizer is not None and model is not None:
+            return
+        if not _loading:
+            t = threading.Thread(target=_download_and_init_model, daemon=True)
+            t.start()
 
 class TranslationRequest(BaseModel):
     text: str
     source_language: str
     target_language: str
 
+@app.on_event("startup")
+def startup_event():
+    # Start loading in background so the server can bind immediately
+    ensure_loading_in_background()
 
 @app.get("/")
 def root():
@@ -65,22 +84,21 @@ def root():
         "status": "running"
     }
 
-
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
         "model": MODEL_ID,
-        "model_loaded": tokenizer is not None and model is not None
+        "model_loaded": tokenizer is not None and model is not None,
+        "loading": _loading
     }
-
 
 @app.post("/translate")
 def translate(request: TranslationRequest):
-
+    # If model not ready, start background load and return 503 while it loads
     if tokenizer is None or model is None:
-        # Not ready to serve translations
-        raise HTTPException(status_code=503, detail="Model not loaded yet; check HUGGINGFACE_HUB_TOKEN and logs.")
+        ensure_loading_in_background()
+        raise HTTPException(status_code=503, detail="Model is loading in background; try again in a minute.")
 
     tokenizer.src_lang = request.source_language
 

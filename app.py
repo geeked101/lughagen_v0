@@ -41,13 +41,21 @@ def _download_and_init_model():
                 print("HF HEAD check failed:", repr(e))
 
         print("Loading LughaGen tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_auth_token=hf_token)
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_ID,
+            token=hf_token
+        )
 
-        print("Loading LughaGen model (low_cpu_mem_usage=True)...")
-        # low_cpu_mem_usage reduces peak memory requirement when loading large CPU models
-        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID, use_auth_token=hf_token, low_cpu_mem_usage=True)
+        print("Tokenizer loaded!")
 
-        print("LughaGen loaded successfully!")
+        # Temporarily disabled model loading to reduce startup memory/time while testing.
+        # model = AutoModelForSeq2SeqLM.from_pretrained(
+        #     MODEL_ID,
+        #     use_auth_token=hf_token,
+        #     low_cpu_mem_usage=True
+        # )
+
+        # print("LughaGen loaded successfully!")
     except Exception as e:
         print("LughaGen failed to load:", repr(e))
         tokenizer = None
